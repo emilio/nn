@@ -1,0 +1,9 @@
+[package]
+name = "neural-networks-practice"
+version = "0.1.0"
+authors = ["Emilio Cobos Álvarez <emilio@crisal.io>"]
+build = "build.rs"
+license = "GPL-3.0+"
+
+[dependencies]
+rand = "0.3.5"
