@@ -18,7 +18,6 @@
 extern crate rand;
 
 use rand::Rng;
-use std::marker::PhantomData;
 use std::{io, fs, path};
 
 trait ActivationFunction {
@@ -105,6 +104,8 @@ impl ActivationFunction for LogisticActivationFunction {
 
 struct NeuralNetwork {
     layers: Vec<Layer>,
+    learning_rate: f32,
+    error_boundary: f32,
 }
 
 impl NeuralNetwork {
@@ -142,74 +143,74 @@ impl NeuralNetwork {
                                        BIAS,
                                        rng));
                 layers
-            }
+            },
+            learning_rate: learning_factor,
+            error_boundary: error_boundary,
         }
     }
 
-    fn feed<A>(&self, mut input: &[f32]) -> Vec<f32>
+    // Returns all the outputs of all the neurons.
+    fn feed<A>(&self, input: &[f32]) -> Vec<Vec<f32>>
         where A: ActivationFunction,
     {
-        use std::mem;
+        let mut outputs = vec![input.to_owned()];
 
-        let mut layers = self.layers.iter();
-        let mut output = vec![];
-
-        // Done this way to avoid tripping the borrow checker while avoiding the
-        // extra allocation of `input`.
-        if let Some(layer) = layers.next() {
-            output = Vec::with_capacity(layer.neurons.len());
-            for neuron in &layer.neurons {
-                output.push(neuron.output::<A>(input))
-            }
-        }
-
-        while let Some(layer) = layers.next() {
+        for layer in &self.layers {
             let mut this_layer_output = Vec::with_capacity(layer.neurons.len());
-            for neuron in &layer.neurons {
-                this_layer_output.push(neuron.output::<A>(&output))
+            {
+                let output = outputs.last().unwrap();
+                for neuron in &layer.neurons {
+                    this_layer_output.push(neuron.output::<A>(&output))
+                }
             }
-            mem::replace(&mut output, this_layer_output);
+            outputs.push(this_layer_output);
         }
 
-        output
+        outputs
     }
 
-    fn train<Data>(&mut self, training_data: &[Data])
+    fn train<Data, A>(&mut self, training_data: &[Data])
         where Data: TrainingData,
+              A: ActivationFunction,
     {
         for data in training_data {
-            self.train_one(data);
+            self.train_one::<Data, A>(data);
         }
     }
 
-    fn train_one<Data>(&mut self, training_data: &Data)
+    fn train_one<Data, A>(&mut self, data: &Data)
         where Data: TrainingData,
+              A: ActivationFunction,
     {
         let input = data.input();
-        let output = self.feed(input);
+        let outputs = self.feed::<A>(input);
         let expected_output = data.output();
+
+        let output = outputs.last().unwrap();
 
         assert_eq!(output.len(), expected_output.len());
         let mut total_error = Vec::with_capacity(output.len());
         for (actual, expected) in output.iter().zip(expected_output.iter()) {
-            error.push(expected - actual);
+            total_error.push(expected - actual);
         }
 
         // Update the weights in the output layer.
         for (i, neuron) in self.layers.last_mut().unwrap().neurons.iter_mut().enumerate() {
+            let last_input = &outputs[outputs.len() - 2];
             for (j, weight) in neuron.weights.iter_mut().enumerate() {
-                let partial_error = total_error[i] * neuron.last_input[j];
+                let partial_error = total_error[i] * last_input[j];
                 *weight -= self.learning_rate * partial_error;
             }
         }
 
         for layer in self.layers.iter_mut().rev().skip(1) {
-            let mut partial_error = Vec::with_capacity(layer.neurons.len());
+            let /* mut */ partial_error =
+                Vec::<f32>::with_capacity(layer.neurons.len());
 
-            for neuron in &layer.neurons {
+            for _neuron in &layer.neurons {
                 // We need to calculate the derivative of the error with respect
                 // to the output of each hidden layer neuron.
-                let mut error_
+                // let mut error_
             }
         }
     }
@@ -302,8 +303,6 @@ impl TrainingData for MNISTLabeledImage {
     }
 }
 
-impl
-
 impl Iterator for MNISTTestImageIterator {
     type Item = io::Result<MNISTLabeledImage>;
 
@@ -344,9 +343,9 @@ impl Iterator for MNISTTestImageIterator {
             }
         }
 
-        assert!(label >= 0 && label <= 9);
+        assert!(label <= 9);
         let mut output = vec![0.0; 10];
-        output[label] = 1.0;
+        output[label as usize] = 1.0;
 
         Some(Ok(MNISTLabeledImage {
             label: label,
