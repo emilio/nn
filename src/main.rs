@@ -18,59 +18,68 @@
 extern crate rand;
 
 use rand::Rng;
-use std::{io, fs, path};
+use std::{io, fs, path, slice};
 
 trait ActivationFunction {
     fn activation_function(z: f32) -> f32;
+    fn activation_function_derivative(z: f32) -> f32;
 }
 
+#[derive(Debug)]
 struct Neuron {
     bias: f32,
-    weights: Vec<f32>, // Of length `input_count + 1`, for the bias.
+    /// The current weights of the connections arriving to this neuron.
+    weights: Vec<f32>,
+    /// The last output of the neuron.
+    output: f32,
+    /// The sum value of the neuron.
+    sum: f32,
+    /// The last gradient computing during back-propagation.
+    gradient: f32,
 }
 
 impl Neuron {
     fn new<R: Rng>(bias: f32, input_count: usize, rng: &mut R) -> Self {
-        let mut weights = Vec::with_capacity(input_count + 1);
-        for _ in 0..input_count + 1 {
-            weights.push(rng.next_f32());
+        let mut weights = Vec::with_capacity(input_count);
+        for _ in 0..input_count {
+            weights.push(rng.next_f32() - 0.5);
         }
 
         Self {
             bias: bias,
             weights: weights,
+            output: 0.0,
+            sum: 0.0,
+            gradient: 0.0,
         }
     }
 
-    fn input_count(&self) -> usize {
-        self.weights.len() - 1
-    }
-
-    fn weighted_bias(&self) -> f32 {
-        self.bias * self.weights[self.weights.len() - 1]
-    }
-
-    fn unbiased_sum(&self, inputs: &[f32]) -> f32 {
-        assert_eq!(inputs.len(), self.input_count());
+    fn sum<I>(&self, inputs: I) -> f32
+        where I: ExactSizeIterator<Item = f32>,
+    {
+        assert_eq!(inputs.len(), self.weights.len());
         let mut ret = 0.0;
-        for (input, weight) in inputs.iter().zip(self.weights.iter()) {
+
+        for (input, weight) in inputs.zip(self.weights.iter()) {
             ret += input * weight;
         }
 
         ret
     }
 
-    fn biased_sum(&self, inputs: &[f32]) -> f32 {
-        self.unbiased_sum(inputs) + self.weighted_bias()
+    fn activate<A, I>(&mut self, inputs: I)
+        where A: ActivationFunction,
+              I: ExactSizeIterator<Item = f32>,
+    {
+        let sum = self.sum(inputs);
+        let output = A::activation_function(sum);
+        self.sum = sum;
+        self.output = output;
     }
 
-    fn output<A>(&self, inputs: &[f32]) -> f32
-        where A: ActivationFunction,
-    {
-        A::activation_function(self.biased_sum(inputs))
-    }
 }
 
+#[derive(Debug)]
 struct Layer {
     neurons: Vec<Neuron>,
 }
@@ -88,7 +97,39 @@ impl Layer {
             neurons: neurons,
         }
     }
+
+    fn input_iter<'a>(&'a self) -> LayerIterator<'a> {
+        LayerIterator(self.neurons.iter())
+    }
+
+    // Feed forward this layer with a given input.
+    fn feed<A, I>(&mut self, inputs: I)
+        where A: ActivationFunction,
+              I: ExactSizeIterator<Item = f32> + Clone,
+    {
+        for neuron in &mut self.neurons {
+            neuron.activate::<A, _>(inputs.clone())
+        }
+    }
 }
+
+#[derive(Clone)]
+struct LayerIterator<'a>(slice::Iter<'a, Neuron>);
+
+impl<'a> Iterator for LayerIterator<'a> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|n| n.output)
+    }
+}
+
+impl<'a> ExactSizeIterator for LayerIterator<'a> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 
 struct LogisticActivationFunction;
 
@@ -98,30 +139,42 @@ struct LogisticActivationFunction;
 impl ActivationFunction for LogisticActivationFunction {
     fn activation_function(z: f32) -> f32 {
         use std::f32;
-        1.0 / (1.0 + f32::consts::E.powf(z))
+        1.0 / (1.0 + f32::consts::E.powf(- z))
+    }
+
+    fn activation_function_derivative(z: f32) -> f32 {
+        let f = Self::activation_function(z);
+        f * (1. - f)
     }
 }
 
+#[derive(Debug)]
 struct NeuralNetwork {
+    // NB: We only represent in this field the hidden layers plus the output.
+    //
+    // The "input" layer is made up while forward-propagating.
     layers: Vec<Layer>,
     learning_rate: f32,
     error_boundary: f32,
 }
 
 impl NeuralNetwork {
-    fn new<R: Rng>(input_count: usize,
-                   output_count: usize,
-                   hidden_layer_count: usize,
-                   hidden_neuron_count_per_layer: usize,
-                   learning_factor: f32,
-                   error_boundary: f32,
-                   rng: &mut R)
-                   -> Self {
-        const BIAS: f32 = 1.0;
+    fn new<R: Rng>(
+        input_count: usize,
+        output_count: usize,
+        hidden_layer_count: usize,
+        hidden_neuron_count_per_layer: usize,
+        learning_factor: f32,
+        error_boundary: f32,
+        rng: &mut R)
+        -> Self
+    {
+        const BIAS: f32 = 0.1;
         Self {
             layers: if hidden_layer_count == 0 {
                 vec![
-                    Layer::new(output_count, input_count, BIAS, rng)
+                    Layer::new(input_count, input_count, BIAS, rng),
+                    Layer::new(output_count, input_count, BIAS, rng),
                 ]
             } else {
                 let mut layers = Vec::with_capacity(hidden_layer_count + 2);
@@ -150,74 +203,92 @@ impl NeuralNetwork {
     }
 
     // Returns all the outputs of all the neurons.
-    fn feed<A>(&self, input: &[f32]) -> Vec<Vec<f32>>
+    //
+    // This uses forward-propagation on all the existing layers.
+    fn feed<A>(&mut self, input: &[f32])
         where A: ActivationFunction,
     {
-        let mut outputs = vec![input.to_owned()];
+        self.layers[0].feed::<A, _>(input.iter().cloned());
 
-        for layer in &self.layers {
-            let mut this_layer_output = Vec::with_capacity(layer.neurons.len());
-            {
-                let output = outputs.last().unwrap();
-                for neuron in &layer.neurons {
-                    this_layer_output.push(neuron.output::<A>(&output))
-                }
-            }
-            outputs.push(this_layer_output);
+        for i in 1..self.layers.len() {
+            // self.layers[i].feed::<A, _>(self.layers[i - 1].input_iter());
+            let (l, mut r) = self.layers.split_at_mut(i);
+            r[0].feed::<A,_>(l.last().unwrap().input_iter());
         }
-
-        outputs
     }
 
-    fn train<Data, A>(&mut self, training_data: &[Data])
-        where Data: TrainingData,
-              A: ActivationFunction,
+    fn backpropagate<A>(&mut self, expected_output: &[f32])
+        where A: ActivationFunction,
     {
-        for data in training_data {
-            self.train_one::<Data, A>(data);
+        debug_assert_eq!(self.layers.last().unwrap().neurons.len(), expected_output.len());
+        {
+            // Grab the output layer gradients.
+            let mut output_layer = self.layers.last_mut().unwrap();
+            for (neuron, expected_output) in output_layer.neurons.iter_mut().zip(expected_output.iter()) {
+                neuron.gradient = *expected_output - neuron.output;
+            }
         }
+
+        {
+            let mut iter = self.layers.iter_mut().rev();
+            let mut next = iter.next();
+
+            // Calculate hidden layer gradients.
+            while let Some(next_layer) = next {
+                let mut this_layer = match iter.next() {
+                    Some(n) => n,
+                    None => break,
+                };
+
+                for (i, neuron) in this_layer.neurons.iter_mut().enumerate() {
+                    let mut pd_error = 0.;
+
+                    for next_layer_neuron in &mut next_layer.neurons {
+                        pd_error += next_layer_neuron.gradient * next_layer_neuron.weights[i];
+                    }
+
+                    neuron.gradient = pd_error;
+                }
+
+                next = Some(this_layer);
+            }
+        }
+
+        let mut iter = self.layers.iter_mut();
+        let mut next = iter.next();
+        while let Some(mut previous_layer) = next {
+            let mut this_layer = match iter.next() {
+                Some(n) => n,
+                None => break,
+            };
+
+            for neuron in &mut this_layer.neurons {
+                let df_input = A::activation_function_derivative(neuron.output);
+                let delta = neuron.gradient;
+                for (i, previous_neuron) in previous_layer.neurons.iter_mut().enumerate() {
+                    neuron.weights[i] +=
+                        self.learning_rate * delta * df_input * previous_neuron.output;
+                }
+            }
+
+            next = Some(this_layer);
+        }
+
+
+
     }
 
     fn train_one<Data, A>(&mut self, data: &Data)
         where Data: TrainingData,
               A: ActivationFunction,
     {
-        let input = data.input();
-        let outputs = self.feed::<A>(input);
-        let expected_output = data.output();
-
-        let output = outputs.last().unwrap();
-
-        assert_eq!(output.len(), expected_output.len());
-        let mut total_error = Vec::with_capacity(output.len());
-        for (actual, expected) in output.iter().zip(expected_output.iter()) {
-            total_error.push(expected - actual);
-        }
-
-        // Update the weights in the output layer.
-        for (i, neuron) in self.layers.last_mut().unwrap().neurons.iter_mut().enumerate() {
-            let last_input = &outputs[outputs.len() - 2];
-            for (j, weight) in neuron.weights.iter_mut().enumerate() {
-                let partial_error = total_error[i] * last_input[j];
-                *weight -= self.learning_rate * partial_error;
-            }
-        }
-
-        for layer in self.layers.iter_mut().rev().skip(1) {
-            let /* mut */ partial_error =
-                Vec::<f32>::with_capacity(layer.neurons.len());
-
-            for _neuron in &layer.neurons {
-                // We need to calculate the derivative of the error with respect
-                // to the output of each hidden layer neuron.
-                // let mut error_
-            }
-        }
+        self.feed::<A>(data.input());
+        self.backpropagate::<A>(data.output());
     }
 }
 
 
-struct MNISTTestImageIterator {
+struct MNISTImageIterator {
     images: io::Bytes<fs::File>,
     labels: io::Bytes<fs::File>,
     count: usize,
@@ -247,8 +318,8 @@ fn read_u32(bytes: &mut io::Bytes<fs::File>) -> io::Result<u32> {
        (fourth as u32))
 }
 
-impl MNISTTestImageIterator {
-    fn new(mnist_path: &path::Path) -> io::Result<Self> {
+impl MNISTImageIterator {
+    fn training(mnist_path: &path::Path) -> io::Result<Self> {
         use std::io::Read;
         Self {
             images: fs::File::open(mnist_path.join("train-images-idx3-ubyte"))?.bytes(),
@@ -259,6 +330,16 @@ impl MNISTTestImageIterator {
         }.init()
     }
 
+    fn testing(mnist_path: &path::Path) -> io::Result<Self> {
+        use std::io::Read;
+        Self {
+            images: fs::File::open(mnist_path.join("t10k-images-idx3-ubyte"))?.bytes(),
+            labels: fs::File::open(mnist_path.join("t10k-labels-idx1-ubyte"))?.bytes(),
+            count: 0,
+            rows: 0,
+            columns: 0,
+        }.init()
+    }
 
     fn init(mut self) -> io::Result<Self> {
         // TODO(emilio): Return errors instead of asserting.
@@ -303,7 +384,7 @@ impl TrainingData for MNISTLabeledImage {
     }
 }
 
-impl Iterator for MNISTTestImageIterator {
+impl Iterator for MNISTImageIterator {
     type Item = io::Result<MNISTLabeledImage>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -358,11 +439,82 @@ impl Iterator for MNISTTestImageIterator {
 }
 
 fn main() {
+    const INPUT_COUNT: usize = 28 * 28;
+    const OUTPUT_COUNT: usize = 10;
+    const HIDDEN_LAYERS: usize = 1;
+    const NEURONS_PER_HIDDEN_LAYER: usize = INPUT_COUNT / 2;
+    const LEARNING_FACTOR: f32 = 0.03;
+
     // http://yann.lecun.com/exdb/mnist/
     let mnist_path = path::Path::new("./mnist");
-    let images = MNISTTestImageIterator::new(&mnist_path).unwrap();
-    let mut count = 0;
-    for _image in images {
-        count += 1;
+    let mut rng = rand::OsRng::new().unwrap();
+
+    let mut network = NeuralNetwork::new(
+        INPUT_COUNT,
+        OUTPUT_COUNT,
+        HIDDEN_LAYERS,
+        NEURONS_PER_HIDDEN_LAYER,
+        LEARNING_FACTOR,
+        0.4,
+        &mut rng
+    );
+
+    {
+        let mut count = 1;
+        let training_images = MNISTImageIterator::training(&mnist_path).unwrap();
+        let total = training_images.count;
+        for image in training_images {
+            let image = image.unwrap();
+            network.train_one::<_, LogisticActivationFunction>(&image);
+            // let output: Vec<_> = network.layers.last().unwrap().input_iter().collect();
+
+            if count % 100 == 0 {
+                println!("Trained...{} / {}", count, total);
+                // println!("{:?}", output);
+                // println!("{:?}", image.output());
+                // ::std::thread::sleep_ms(50);
+            }
+            count += 1;
+        }
+    }
+
+    {
+        let mut count = 1;
+        let mut hits = 0;
+        let test_images = MNISTImageIterator::testing(&mnist_path).unwrap();
+        let total = test_images.count;
+        for image in test_images.take(5000) {
+            let image = image.unwrap();
+
+            network.feed::<LogisticActivationFunction>(image.input());
+            let output: Vec<_> = network.layers.last().unwrap().input_iter().collect();
+
+            let mut index = 0;
+            let mut max = output[0];
+            for (i, v) in output.iter().enumerate() {
+                if *v > max {
+                    max = *v;
+                    index = i;
+                }
+            }
+
+            let expected = image.output().iter().position(|v| *v > 0.).unwrap();
+            if expected == index {
+                hits += 1;
+            }
+
+            let ratio = hits as f32 / count as f32;
+
+            if count % 1000 == 0 {
+                println!("{} / {} ({}, {} -> {}): {}%",
+                         count, total, expected, index,
+                         expected == index, ratio * 100.);
+            }
+
+            // println!("{:?}", output);
+            // println!("{:?}", image.output());
+            // ::std::thread::sleep_ms(50);
+            count += 1;
+        }
     }
 }
