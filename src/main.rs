@@ -15,6 +15,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#![feature(link_args)]
+
 extern crate rand;
 
 use rand::Rng;
@@ -27,9 +29,10 @@ trait ActivationFunction {
 
 #[derive(Debug)]
 struct Neuron {
-    bias: f32,
     /// The current weights of the connections arriving to this neuron.
     weights: Vec<f32>,
+    /// The weights of the previous round of learning for this neuron.
+    previous_weights: Vec<f32>,
     /// The last output of the neuron.
     output: f32,
     /// The sum value of the neuron.
@@ -39,15 +42,15 @@ struct Neuron {
 }
 
 impl Neuron {
-    fn new<R: Rng>(bias: f32, input_count: usize, rng: &mut R) -> Self {
+    fn new<R: Rng>(input_count: usize, rng: &mut R) -> Self {
         let mut weights = Vec::with_capacity(input_count);
         for _ in 0..input_count {
             weights.push(rng.next_f32() - 0.5);
         }
 
         Self {
-            bias: bias,
-            weights: weights,
+            weights: weights.clone(),
+            previous_weights: weights,
             output: 0.0,
             sum: 0.0,
             gradient: 0.0,
@@ -85,13 +88,15 @@ struct Layer {
 }
 
 impl Layer {
-    fn new<R: Rng>(neuron_count: usize,
-                   input_count: usize,
-                   bias: f32,
-                   rng: &mut R) -> Self {
+    fn new<R: Rng>(
+        neuron_count: usize,
+        input_count: usize,
+        rng: &mut R)
+        -> Self
+    {
         let mut neurons = Vec::with_capacity(neuron_count);
         for _ in 0..neuron_count {
-            neurons.push(Neuron::new(bias, input_count, rng))
+            neurons.push(Neuron::new(input_count, rng))
         }
         Layer {
             neurons: neurons,
@@ -149,13 +154,13 @@ impl ActivationFunction for LogisticActivationFunction {
 }
 
 #[derive(Debug)]
-struct NeuralNetwork {
+pub struct NeuralNetwork {
     // NB: We only represent in this field the hidden layers plus the output.
     //
     // The "input" layer is made up while forward-propagating.
     layers: Vec<Layer>,
     learning_rate: f32,
-    error_boundary: f32,
+    momentum_rate: f32,
 }
 
 impl NeuralNetwork {
@@ -165,40 +170,40 @@ impl NeuralNetwork {
         hidden_layer_count: usize,
         hidden_neuron_count_per_layer: usize,
         learning_factor: f32,
-        error_boundary: f32,
+        momentum_rate: f32,
         rng: &mut R)
         -> Self
     {
-        const BIAS: f32 = 0.1;
+        println!("NeuralNetwork::new({}, {}, {}, {}, {}, {}, <rng>)",
+                 input_count, output_count, hidden_layer_count,
+                 hidden_neuron_count_per_layer, learning_factor, momentum_rate);
+
         Self {
             layers: if hidden_layer_count == 0 {
                 vec![
-                    Layer::new(input_count, input_count, BIAS, rng),
-                    Layer::new(output_count, input_count, BIAS, rng),
+                    Layer::new(input_count, input_count, rng),
+                    Layer::new(output_count, input_count, rng),
                 ]
             } else {
                 let mut layers = Vec::with_capacity(hidden_layer_count + 2);
                 layers.push(Layer::new(hidden_neuron_count_per_layer,
                                        input_count,
-                                       BIAS,
                                        rng));
                 for _ in 0..hidden_layer_count {
                     let hidden_layer =
                         Layer::new(hidden_neuron_count_per_layer,
                                    hidden_neuron_count_per_layer,
-                                   BIAS,
                                    rng);
                     layers.push(hidden_layer);
                 }
 
                 layers.push(Layer::new(output_count,
                                        hidden_neuron_count_per_layer,
-                                       BIAS,
                                        rng));
                 layers
             },
             learning_rate: learning_factor,
-            error_boundary: error_boundary,
+            momentum_rate: momentum_rate,
         }
     }
 
@@ -265,17 +270,18 @@ impl NeuralNetwork {
             for neuron in &mut this_layer.neurons {
                 let df_input = A::activation_function_derivative(neuron.output);
                 let delta = neuron.gradient;
+                let previous_weights = neuron.weights.clone();
                 for (i, previous_neuron) in previous_layer.neurons.iter_mut().enumerate() {
+                    let momentum = self.momentum_rate * (neuron.weights[i] - neuron.previous_weights[i]);
                     neuron.weights[i] +=
+                        momentum +
                         self.learning_rate * delta * df_input * previous_neuron.output;
                 }
+                neuron.previous_weights = previous_weights;
             }
 
             next = Some(this_layer);
         }
-
-
-
     }
 
     fn train_one<Data, A>(&mut self, data: &Data)
@@ -284,6 +290,27 @@ impl NeuralNetwork {
     {
         self.feed::<A>(data.input());
         self.backpropagate::<A>(data.output());
+    }
+
+    fn output_size(&self) -> usize {
+        self.layers.last().unwrap().input_iter().len()
+    }
+
+    fn last_output(&self) -> usize {
+        let mut max = 0.;
+        let mut max_index = 0;
+        let mut i = 0;
+
+        for v in self.layers.last().unwrap().input_iter() {
+            if v > max {
+                max_index = i;
+                max = v;
+            }
+
+            i += 1;
+        }
+
+        max_index
     }
 }
 
@@ -366,6 +393,21 @@ trait TrainingData {
     fn output(&self) -> &[f32];
 }
 
+struct SimpleTrainingData<'a> {
+    input: &'a [f32],
+    output: &'a [f32],
+}
+
+impl<'a> TrainingData for SimpleTrainingData<'a> {
+    fn input(&self) -> &[f32] {
+        self.input
+    }
+
+    fn output(&self) -> &[f32] {
+        self.output
+    }
+}
+
 #[derive(Debug)]
 struct MNISTLabeledImage {
     pixels: Vec<f32>, // Bytes normalized from 0..255 to 0.0..1.0
@@ -438,12 +480,111 @@ impl Iterator for MNISTImageIterator {
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn neural_network_destroy(nn: *mut NeuralNetwork) {
+    if nn.is_null() {
+        return;
+    }
+
+    let _ = Box::from_raw(nn);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn neural_network_create(
+    input_count: usize,
+    output_count: usize,
+    hidden_layer_count: usize,
+    hidden_neuron_count_per_layer: usize,
+    learning_factor: f32,
+    momentum_rate: f32)
+    -> *mut NeuralNetwork
+{
+    use std::ptr;
+
+    let mut rng = match rand::OsRng::new() {
+        Ok(rng) => rng,
+        Err(..) => return ptr::null_mut(),
+    };
+
+    let nn = Box::new(NeuralNetwork::new(
+        input_count,
+        output_count,
+        hidden_layer_count,
+        hidden_neuron_count_per_layer,
+        learning_factor,
+        momentum_rate,
+        &mut rng
+    ));
+
+    Box::into_raw(nn)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn neural_network_feed(
+    nn: *mut NeuralNetwork,
+    input: *const f32,
+    len: usize)
+    -> isize
+{
+    use std::slice;
+
+    if nn.is_null() {
+        return -1;
+    }
+
+    let slice = slice::from_raw_parts(input, len);
+    (*nn).feed::<LogisticActivationFunction>(slice);
+
+    (*nn).last_output() as isize
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn neural_network_train_one(
+    nn: *mut NeuralNetwork,
+    label: usize,
+    input: *const f32,
+    len: usize)
+    -> isize
+{
+    use std::slice;
+
+    if nn.is_null() {
+        return -1;
+    }
+
+    let output_len = (*nn).output_size();
+    if label >= output_len {
+        return -2;
+    }
+
+    let slice = slice::from_raw_parts(input, len);
+    let mut output = vec![0.0; output_len];
+    output[label] = 1.0;
+
+    let data = SimpleTrainingData {
+        input: slice,
+        output: &output,
+    };
+
+    (*nn).train_one::<_, LogisticActivationFunction>(&data);
+    (*nn).last_output() as isize
+}
+
+#[cfg(target_os = "emscripten")]
+#[link_args = "-s ALLOW_MEMORY_GROWTH=20 -s NO_EXIT_RUNTIME=1"]
+extern {}
+
+#[cfg(target_os = "emscripten")]
+fn main() { /* Intentionally empty */ }
+
+#[cfg(not(target_os = "emscripten"))]
 fn main() {
     const INPUT_COUNT: usize = 28 * 28;
     const OUTPUT_COUNT: usize = 10;
     const HIDDEN_LAYERS: usize = 1;
-    const NEURONS_PER_HIDDEN_LAYER: usize = INPUT_COUNT / 2;
-    const LEARNING_FACTOR: f32 = 0.03;
+    const NEURONS_PER_HIDDEN_LAYER: usize = INPUT_COUNT;
+    const LEARNING_FACTOR: f32 = 0.3;
+    const MOMENTUM_RATE: f32 = 0.03;
 
     // http://yann.lecun.com/exdb/mnist/
     let mnist_path = path::Path::new("./mnist");
@@ -455,7 +596,7 @@ fn main() {
         HIDDEN_LAYERS,
         NEURONS_PER_HIDDEN_LAYER,
         LEARNING_FACTOR,
-        0.4,
+        MOMENTUM_RATE,
         &mut rng
     );
 
@@ -487,16 +628,8 @@ fn main() {
             let image = image.unwrap();
 
             network.feed::<LogisticActivationFunction>(image.input());
-            let output: Vec<_> = network.layers.last().unwrap().input_iter().collect();
 
-            let mut index = 0;
-            let mut max = output[0];
-            for (i, v) in output.iter().enumerate() {
-                if *v > max {
-                    max = *v;
-                    index = i;
-                }
-            }
+            let index = network.last_output();
 
             let expected = image.output().iter().position(|v| *v > 0.).unwrap();
             if expected == index {
