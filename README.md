@@ -1,44 +1,41 @@
-# Local search algoritms implementation in Rust to Emscripten
+# Multi-layer neural network
 
-This is part of a **Work in progress** I'm doing for an Artificial Intelligence
-course.
+This is an implementation of a multi-layer neural network in Rust, with
+a graphical user interface written in QT. This is part of schoolwork.
 
-In particular, I can't promise the algorithms are correct, since I've only done
-this for a few days, though I hope so!
+I initially wanted to implement it in Emscripten, and do a web application. But
+turns out that the memory requirements for the neural network don't keep
+browsers happy. In particular:
 
-Also, the interface is quite ugly. I'm sorry.
+ * Gecko takes forever while reallocating the memory arrays.
+ * Blink just crashes.
 
-The program consists of a Rust file compiled to emscripten, an index.html file,
-and a TypeScript file that compiles to JavaScript for the application event
-handling UI.
+So... I had to learn QT in an evening, and add a QT application that calls into
+rust.
 
-Some known gotchas:
-
- * It's ugly (for now at least, I haven't bothered a lot in designing it, I just
-   wanted a damn chess on screen).
-
- * Only shows the best state for Local Beam Search and Genetic Algorithm.
-
- * Could be more memory efficient (just read the TODOs in `src/main.rs`).
-
- * Should be more modular. I did it initially with `Makefile`s and calling
-   `rustc` by hand, but `cargo` and dependencies just worked out of the box, and
-   `build.rs`'s flexibility is all I needed! Anyway, that's the explanation for
-   the monofile.
+So far it's working nicely!
 
 ## Requirements
 
- * [Rust nightly](http://rustup.rs/).
- * TypeScript compiler: `npm install -g typescript`.
- * Emscripten toolchain ([Varies by system][emscripten]).
+ * [`rust`](http://rustup.rs/)
+ * `cmake`
+ * The QT 5 libraries somewhere in your path.
 
-To test the code you only need Rust nightly. Running `cargo test` should work.
+## Building
 
-For running it:
+In order to build, you just need to:
 
-```console
-$ cargo build --target asmjs-unknown-emscripten
-$ firefox ./target/asmjs-unknown-emscripten/debug/index.html
+```
+$ cargo build [--release]
 ```
 
-[emscripten]: https://kripken.github.io/emscripten-site/docs/getting_started/downloads.html
+## Running
+
+By default, the program grabs the `mnist` dataset, and trains the network
+getting the error.
+
+To run the graphical version you need to pass the `-g` flag, that is:
+
+```
+$ cargo run -- -g
+```

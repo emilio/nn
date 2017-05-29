@@ -1,32 +1,11 @@
-use std::env;
-use std::path::Path;
-use std::process::Command;
+extern crate cmake;
 
 fn main() {
-    let target = env::var("TARGET").unwrap();
-    if target.contains("emscripten") {
-        let dest = env::var("OUT_DIR").unwrap();
-        let dest = Path::new(&dest);
-
-        println!("cargo:rerun-if-changed=src/application.ts");
-        println!("cargo:rerun-if-changed=src/index.html");
-
-        // Dump it in the same directory as the executable.
-        let dest = dest.parent().unwrap().parent().unwrap().parent().unwrap();
-
-        Command::new("tsc")
-            .arg("--module")
-            .arg("amd")
-            .arg("src/application.ts")
-            .arg("--outFile")
-            .arg(dest.join("application.js"))
-            .output()
-            .expect("Couldn't run tsc, or it failed!");
-
-        Command::new("cp")
-            .arg("src/index.html")
-            .arg(dest.join("index.html"))
-            .output()
-            .expect("Couldn't copy the index.html file!");
-    }
+    let dst = cmake::build("gui");
+    println!("cargo:rustc-link-search=native={}", dst.display());
+    println!("cargo:rustc-link-lib=static=neural-networks-gui");
+    println!("cargo:rustc-link-lib=stdc++");
+    println!("cargo:rustc-link-lib=dylib=Qt5Core");
+    println!("cargo:rustc-link-lib=dylib=Qt5Widgets");
+    println!("cargo:rustc-link-lib=dylib=Qt5Gui");
 }

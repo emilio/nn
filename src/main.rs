@@ -15,8 +15,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#![feature(link_args)]
-
+#[macro_use]
+extern crate clap;
 extern crate rand;
 
 use rand::Rng;
@@ -155,12 +155,10 @@ impl ActivationFunction for LogisticActivationFunction {
 
 #[derive(Debug)]
 pub struct NeuralNetwork {
-    // NB: We only represent in this field the hidden layers plus the output.
-    //
-    // The "input" layer is made up while forward-propagating.
     layers: Vec<Layer>,
     learning_rate: f32,
     momentum_rate: f32,
+    input_size: usize,
 }
 
 impl NeuralNetwork {
@@ -174,10 +172,6 @@ impl NeuralNetwork {
         rng: &mut R)
         -> Self
     {
-        println!("NeuralNetwork::new({}, {}, {}, {}, {}, {}, <rng>)",
-                 input_count, output_count, hidden_layer_count,
-                 hidden_neuron_count_per_layer, learning_factor, momentum_rate);
-
         Self {
             layers: if hidden_layer_count == 0 {
                 vec![
@@ -204,6 +198,7 @@ impl NeuralNetwork {
             },
             learning_rate: learning_factor,
             momentum_rate: momentum_rate,
+            input_size: input_count,
         }
     }
 
@@ -294,6 +289,10 @@ impl NeuralNetwork {
 
     fn output_size(&self) -> usize {
         self.layers.last().unwrap().input_iter().len()
+    }
+
+    fn input_size(&self) -> usize {
+        self.input_size
     }
 
     fn last_output(&self) -> usize {
@@ -522,8 +521,7 @@ pub unsafe extern "C" fn neural_network_create(
 #[no_mangle]
 pub unsafe extern "C" fn neural_network_feed(
     nn: *mut NeuralNetwork,
-    input: *const f32,
-    len: usize)
+    input: *const f32)
     -> isize
 {
     use std::slice;
@@ -532,7 +530,7 @@ pub unsafe extern "C" fn neural_network_feed(
         return -1;
     }
 
-    let slice = slice::from_raw_parts(input, len);
+    let slice = slice::from_raw_parts(input, (*nn).input_size());
     (*nn).feed::<LogisticActivationFunction>(slice);
 
     (*nn).last_output() as isize
@@ -542,8 +540,7 @@ pub unsafe extern "C" fn neural_network_feed(
 pub unsafe extern "C" fn neural_network_train_one(
     nn: *mut NeuralNetwork,
     label: usize,
-    input: *const f32,
-    len: usize)
+    input: *const f32)
     -> isize
 {
     use std::slice;
@@ -557,7 +554,7 @@ pub unsafe extern "C" fn neural_network_train_one(
         return -2;
     }
 
-    let slice = slice::from_raw_parts(input, len);
+    let slice = slice::from_raw_parts(input, (*nn).input_size());
     let mut output = vec![0.0; output_len];
     output[label] = 1.0;
 
@@ -570,15 +567,26 @@ pub unsafe extern "C" fn neural_network_train_one(
     (*nn).last_output() as isize
 }
 
-#[cfg(target_os = "emscripten")]
-#[link_args = "-s ALLOW_MEMORY_GROWTH=20 -s NO_EXIT_RUNTIME=1"]
-extern {}
+extern "C" {
+    pub fn cpp_main(
+        argc: ::std::os::raw::c_int,
+        argv: *mut *mut ::std::os::raw::c_char,
+    ) -> ::std::os::raw::c_int;
+}
 
-#[cfg(target_os = "emscripten")]
-fn main() { /* Intentionally empty */ }
-
-#[cfg(not(target_os = "emscripten"))]
 fn main() {
+    let matches = clap::App::new("Multi-layer neural network")
+        .version("0.0.1")
+        .author(crate_authors!())
+        .arg(clap::Arg::with_name("graphical")
+             .help("Launches the QT-based graphical tool")
+             .short("g"))
+        .get_matches();
+
+    if matches.is_present("graphical") {
+        ::std::process::exit(unsafe { cpp_main(0, ::std::ptr::null_mut()) });
+    }
+
     const INPUT_COUNT: usize = 28 * 28;
     const OUTPUT_COUNT: usize = 10;
     const HIDDEN_LAYERS: usize = 1;
