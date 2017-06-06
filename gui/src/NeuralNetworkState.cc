@@ -57,4 +57,7 @@ ssize_t NeuralNetworkState::train(const float* input, size_t label) {
       input);
 }
 
-NeuralNetworkState::~NeuralNetworkState() {}
+NeuralNetworkState::~NeuralNetworkState() {
+  if (m_network)
+    neural_network_destroy(m_network);
+}
